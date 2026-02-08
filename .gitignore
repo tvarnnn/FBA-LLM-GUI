@@ -1,0 +1,35 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+
+# ---- Models / LLM artifacts ----
+models/
+**/models/
+**/snapshots/
+**/*.bin
+**/*.safetensors
+**/*.pt
+**/*.ckpt
+
+# ---- HuggingFace cache ----
+.cache/
+huggingface/
+**/huggingface/
+
+# ---- Large data ----
+inputs/Reviews/*.txt
+inputs/Metrics/*.csv
+
+# ---- Example data ----
+inputs/Metrics/test_metrics.csv
+inputs/Reviews/test_reviews.txt
+
+.idea/
