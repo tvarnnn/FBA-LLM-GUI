@@ -3,6 +3,7 @@ Local LLM–powered decision support for Amazon FBA product viability
 This project is a local, offline Amazon FBA analysis tool that uses a large language model (LLM) to generate grounded, non-hallucinated business insights from structured product metrics and unstructured customer reviews.
 
 ----Key Features----
+
 Local LLM inference (no cloud APIs, no data leakage)
 Metrics ingestion from CSV (price, ratings, reviews, categories, weight)
 Review analysis from raw customer text
