@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 import threading
 import traceback
@@ -11,21 +10,16 @@ from tkinter import filedialog, messagebox, ttk
 from fba_llm.model import find_latest_snapshot, load_model
 from fba_llm.ingest import build_combined_facts_block
 from fba_llm.advisor_text import run_advisor_text
-from fba_llm.formatting import parse_advisor_text_to_json
 from fba_llm.guards import check_no_new_numbers, check_no_banned_claims
 
-# -----------------------------
 # Paths
-# -----------------------------
 ROOT = Path(__file__).resolve().parent
 INPUTS_DIR = ROOT / "inputs"
 METRICS_DIR = INPUTS_DIR / "Metrics"
 REVIEWS_DIR = INPUTS_DIR / "Reviews"
 DEFAULT_CACHE_ROOT = ROOT / "models" / "llama-2-7b-hf"
 
-# -----------------------------
 # Dark theme colors
-# -----------------------------
 DARK = {
     "bg": "#0f111a",
     "panel": "#151827",
@@ -49,16 +43,14 @@ LIGHT = {
 }
 
 
-# -----------------------------
 # Helpers
-# -----------------------------
 def ensure_layout():
     METRICS_DIR.mkdir(parents=True, exist_ok=True)
     REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def pick_latest_file(folder: Path, exts: tuple[str, ...]) -> Path | None:
-    candidates = []
+    candidates: list[Path] = []
     for ext in exts:
         candidates.extend(folder.glob(f"*{ext}"))
     candidates = [p for p in candidates if p.is_file()]
@@ -86,9 +78,7 @@ def copy_into_folder(src: Path, dst_folder: Path, *, clear_existing: bool) -> Pa
     return dst
 
 
-# -----------------------------
 # GUI
-# -----------------------------
 class FbaGui(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -121,7 +111,7 @@ class FbaGui(tk.Tk):
         self._apply_theme()
         self._refresh_input_labels()
 
-    # ------------- Theme -------------
+    #Theme
     def _apply_theme(self):
         palette = DARK if self.dark_mode.get() else LIGHT
 
@@ -155,7 +145,7 @@ class FbaGui(tk.Tk):
         style.map("TNotebook.Tab", background=[("selected", palette["bg"])], foreground=[("selected", palette["fg"])])
 
         # tk.Text widgets (manual)
-        for t in (getattr(self, "json_text", None), getattr(self, "raw_text", None), getattr(self, "facts_text", None)):
+        for t in (getattr(self, "advisor_text", None), getattr(self, "facts_text", None)):
             if t is None:
                 continue
             t.configure(
@@ -172,7 +162,7 @@ class FbaGui(tk.Tk):
     def _on_toggle_theme(self):
         self._apply_theme()
 
-    # ------------- UI Builders -------------
+    # UI Builders
     def _build_ui(self):
         top = ttk.Frame(self, padding=10)
         top.pack(fill="x")
@@ -225,27 +215,22 @@ class FbaGui(tk.Tk):
         tabs = ttk.Notebook(self)
         tabs.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self.json_text = tk.Text(tabs, wrap="word", font=("Consolas", 11))
-        tabs.add(self.json_text, text="Formatted JSON")
-
-        self.raw_text = tk.Text(tabs, wrap="word", font=("Consolas", 11))
-        tabs.add(self.raw_text, text="Raw Model Output")
+        self.advisor_text = tk.Text(tabs, wrap="word", font=("Consolas", 11))
+        tabs.add(self.advisor_text, text="Advisor Output")
 
         self.facts_text = tk.Text(tabs, wrap="word", font=("Consolas", 10))
         tabs.add(self.facts_text, text="Facts Block (debug)")
 
-    # ------------- Thread-safe UI methods -------------
+    # Thread-safe UI methods
     def _ui_set_status(self, msg: str):
         self.after(0, lambda: self.status_var.set(msg))
 
-    def _ui_fill_outputs(self, facts: str, raw: str, pretty_json: str):
+    def _ui_fill_outputs(self, facts: str, raw: str):
         def do():
             self.facts_text.delete("1.0", "end")
-            self.raw_text.delete("1.0", "end")
-            self.json_text.delete("1.0", "end")
+            self.advisor_text.delete("1.0", "end")
             self.facts_text.insert("1.0", facts or "")
-            self.raw_text.insert("1.0", raw or "")
-            self.json_text.insert("1.0", pretty_json or "")
+            self.advisor_text.insert("1.0", raw or "")
         self.after(0, do)
 
     def _ui_finish_run(self):
@@ -254,7 +239,7 @@ class FbaGui(tk.Tk):
             self.run_btn.configure(state="normal")
         self.after(0, do)
 
-    # ------------- Input labels -------------
+    # Input labels
     def _refresh_input_labels(self):
         m = pick_latest_file(METRICS_DIR, (".csv",))
         r = pick_latest_file(REVIEWS_DIR, (".txt",))
@@ -270,7 +255,7 @@ class FbaGui(tk.Tk):
         self.metrics_label_var.set(mtxt)
         self.reviews_label_var.set(rtxt)
 
-    # ------------- Upload handlers -------------
+    # Upload handlers
     def on_upload_metrics(self):
         path = filedialog.askopenfilename(
             title="Select Metrics CSV",
@@ -299,7 +284,7 @@ class FbaGui(tk.Tk):
         except Exception as e:
             messagebox.showerror("Upload error", str(e))
 
-    # ------------- Model loading -------------
+    # Model loading
     def on_load_model(self):
         if self.model_loaded:
             self._ui_set_status("Model already loaded.")
@@ -322,7 +307,7 @@ class FbaGui(tk.Tk):
 
         threading.Thread(target=load_worker, daemon=True).start()
 
-    # ------------- Run pipeline -------------
+    # Run pipeline
     def on_run(self):
         if self.is_running:
             return
@@ -352,8 +337,7 @@ class FbaGui(tk.Tk):
         self.run_btn.configure(state="disabled")
 
         # clear outputs
-        self.json_text.delete("1.0", "end")
-        self.raw_text.delete("1.0", "end")
+        self.advisor_text.delete("1.0", "end")
         self.facts_text.delete("1.0", "end")
 
         def run_worker():
@@ -382,22 +366,7 @@ class FbaGui(tk.Tk):
                 if not ok_claims_raw:
                     raise ValueError(f"CLAIM GUARD TRIGGERED (raw): {hits_raw}")
 
-                # Parse AFTER raw passes guards
-                obj = parse_advisor_text_to_json(raw)
-                pretty = json.dumps(obj, indent=2, ensure_ascii=False)
-
-                # Optional: guard the formatted JSON too
-                json_text = json.dumps(obj, ensure_ascii=False)
-
-                ok_nums_json, extras_json = check_no_new_numbers(json_text, facts_block)
-                if not ok_nums_json:
-                    raise ValueError(f"NUMBER GUARD TRIGGERED (json): {sorted(extras_json)}")
-
-                ok_claims_json, hits_json = check_no_banned_claims(json_text, facts_block)
-                if not ok_claims_json:
-                    raise ValueError(f"CLAIM GUARD TRIGGERED (json): {hits_json}")
-
-                self._ui_fill_outputs(facts_block, raw, pretty)
+                self._ui_fill_outputs(facts_block, raw)
                 self._ui_set_status("Done ✅")
 
             except Exception as e:
@@ -408,13 +377,7 @@ class FbaGui(tk.Tk):
                 raw_preview = (raw or "")[:1500]
 
                 # Still show what we got, so you can debug without rerunning.
-                try:
-                    fallback_obj = parse_advisor_text_to_json(raw) if raw else {}
-                    fallback_pretty = json.dumps(fallback_obj, indent=2, ensure_ascii=False) if raw else ""
-                except Exception:
-                    fallback_pretty = ""
-
-                self._ui_fill_outputs(facts_block or "", raw or "", fallback_pretty)
+                self._ui_fill_outputs(facts_block or "", raw or "")
 
                 self.after(
                     0,

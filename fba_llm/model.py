@@ -17,7 +17,6 @@ def find_latest_snapshot(cache_root: Path) -> Path:
 def load_model(model_path: Path):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    # LLaMA commonly has no pad_token; safe to set to eos
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

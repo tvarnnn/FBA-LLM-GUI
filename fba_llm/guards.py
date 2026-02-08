@@ -21,10 +21,6 @@ def check_no_new_numbers(output_text: str, input_text: str) -> tuple[bool, set[s
 
 
 def check_no_banned_claims(output_text: str, input_text: str) -> tuple[bool, list[str]]:
-    """
-    Conservative guard: block mentions of metrics you *didn't* provide.
-    We allow those terms only if they appear in INPUT DATA (columns/content).
-    """
     out = output_text.lower()
     src = input_text.lower()
 
