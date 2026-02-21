@@ -84,7 +84,7 @@ class FbaGui(tk.Tk):
         super().__init__()
 
         self.title("FBA_LLM – Local Advisor")
-        self.geometry("1050x740")
+        self.geometry("1050x780")
 
         ensure_layout()
 
@@ -105,13 +105,18 @@ class FbaGui(tk.Tk):
         self.reviews_label_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready. Click 'Load Model' first.")
 
+        # Progress UI vars
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_label_var = tk.StringVar(value="")
+
         self.is_running = False
 
         self._build_ui()
         self._apply_theme()
         self._refresh_input_labels()
+        self._ui_progress_reset()
 
-    #Theme
+    # Theme
     def _apply_theme(self):
         palette = DARK if self.dark_mode.get() else LIGHT
 
@@ -143,6 +148,8 @@ class FbaGui(tk.Tk):
         style.configure("TNotebook", background=palette["bg"], bordercolor=palette["border"])
         style.configure("TNotebook.Tab", background=palette["panel"], foreground=palette["fg"], padding=(10, 6))
         style.map("TNotebook.Tab", background=[("selected", palette["bg"])], foreground=[("selected", palette["fg"])])
+
+        style.configure("TProgressbar", troughcolor=palette["panel"])
 
         # tk.Text widgets (manual)
         for t in (getattr(self, "advisor_text", None), getattr(self, "facts_text", None)):
@@ -179,20 +186,22 @@ class FbaGui(tk.Tk):
         inputs = ttk.LabelFrame(self, text="Inputs", padding=10)
         inputs.pack(fill="x", padx=10, pady=8)
 
-        ttk.Checkbutton(inputs, text="Use Metrics CSV", variable=self.use_metrics_var, command=self._refresh_input_labels)\
-            .grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(inputs, text="Use Metrics CSV", variable=self.use_metrics_var, command=self._refresh_input_labels).grid(
+            row=0, column=0, sticky="w"
+        )
         ttk.Button(inputs, text="Upload Metrics CSV…", command=self.on_upload_metrics).grid(row=0, column=1, padx=6)
         ttk.Label(inputs, textvariable=self.metrics_label_var).grid(row=0, column=2, sticky="w")
 
-        ttk.Checkbutton(inputs, text="Use Reviews TXT", variable=self.use_reviews_var, command=self._refresh_input_labels)\
-            .grid(row=1, column=0, sticky="w")
+        ttk.Checkbutton(inputs, text="Use Reviews TXT", variable=self.use_reviews_var, command=self._refresh_input_labels).grid(
+            row=1, column=0, sticky="w"
+        )
         ttk.Button(inputs, text="Upload Reviews TXT…", command=self.on_upload_reviews).grid(row=1, column=1, padx=6)
         ttk.Label(inputs, textvariable=self.reviews_label_var).grid(row=1, column=2, sticky="w")
 
         ttk.Checkbutton(
             inputs,
             text="When uploading, clear old files in that folder",
-            variable=self.clear_old_var
+            variable=self.clear_old_var,
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         inputs.columnconfigure(2, weight=1)
@@ -205,12 +214,24 @@ class FbaGui(tk.Tk):
 
         self.run_btn = ttk.Button(runbox, text="Run Analysis", command=self.on_run)
         self.run_btn.grid(row=0, column=2, padx=6)
-
         runbox.columnconfigure(1, weight=1)
 
-        status = ttk.Frame(self, padding=(10, 0, 10, 10))
+        status = ttk.Frame(self, padding=(10, 0, 10, 6))
         status.pack(fill="x")
         ttk.Label(status, textvariable=self.status_var).pack(anchor="w")
+
+        # Progress row (label + bar)
+        prog = ttk.Frame(self, padding=(10, 0, 10, 10))
+        prog.pack(fill="x")
+
+        ttk.Label(prog, textvariable=self.progress_label_var).pack(anchor="w")
+        self.progress = ttk.Progressbar(
+            prog,
+            variable=self.progress_var,
+            maximum=100.0,
+            mode="determinate",
+        )
+        self.progress.pack(fill="x", pady=(4, 0))
 
         tabs = ttk.Notebook(self)
         tabs.pack(fill="both", expand=True, padx=10, pady=10)
@@ -231,12 +252,44 @@ class FbaGui(tk.Tk):
             self.advisor_text.delete("1.0", "end")
             self.facts_text.insert("1.0", facts or "")
             self.advisor_text.insert("1.0", raw or "")
+
         self.after(0, do)
+
+    def _ui_progress(self, label: str = "", value: float | None = None, *, indeterminate: bool = False):
+        def do():
+            self.progress_label_var.set(label or "")
+
+            if indeterminate:
+                if str(self.progress["mode"]) != "indeterminate":
+                    self.progress.configure(mode="indeterminate")
+                self.progress.start(12)
+            else:
+                try:
+                    self.progress.stop()
+                except Exception:
+                    pass
+                if str(self.progress["mode"]) != "determinate":
+                    self.progress.configure(mode="determinate")
+                if value is not None:
+                    self.progress_var.set(float(value))
+
+        self.after(0, do)
+
+    def _ui_progress_reset(self):
+        self._ui_progress("", 0.0, indeterminate=False)
+
+    def _ui_progress_done(self):
+        self._ui_progress("Complete", 100.0, indeterminate=False)
 
     def _ui_finish_run(self):
         def do():
             self.is_running = False
             self.run_btn.configure(state="normal")
+            try:
+                self.progress.stop()
+            except Exception:
+                pass
+
         self.after(0, do)
 
     # Input labels
@@ -259,7 +312,7 @@ class FbaGui(tk.Tk):
     def on_upload_metrics(self):
         path = filedialog.askopenfilename(
             title="Select Metrics CSV",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
         )
         if not path:
             return
@@ -273,7 +326,7 @@ class FbaGui(tk.Tk):
     def on_upload_reviews(self):
         path = filedialog.askopenfilename(
             title="Select Reviews TXT",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
         )
         if not path:
             return
@@ -288,21 +341,29 @@ class FbaGui(tk.Tk):
     def on_load_model(self):
         if self.model_loaded:
             self._ui_set_status("Model already loaded.")
+            self._ui_progress("Model already loaded.", 100.0, indeterminate=False)
             return
 
         def load_worker():
             try:
                 self._ui_set_status("Loading model (one-time)…")
+                self._ui_progress("Loading model…", 10.0, indeterminate=True)
+
                 cache_root = Path(self.cache_root.get()).expanduser().resolve()
                 model_path = find_latest_snapshot(cache_root)
                 tokenizer, model = load_model(model_path)
+
                 self.tokenizer = tokenizer
                 self.model = model
                 self.model_loaded = True
-                self._ui_set_status(f"Model loaded ✅ ({model_path.name})")
+
+                self._ui_set_status(f"Model loaded({model_path.name})")
+                self._ui_progress("Model loaded", 100.0, indeterminate=False)
+
             except Exception:
                 err_msg = traceback.format_exc()
-                self._ui_set_status("Model load failed ❌")
+                self._ui_set_status("Model load failed")
+                self._ui_progress("Model load failed", 0.0, indeterminate=False)
                 self.after(0, messagebox.showerror, "Model load failed", err_msg)
 
         threading.Thread(target=load_worker, daemon=True).start()
@@ -336,14 +397,17 @@ class FbaGui(tk.Tk):
         self.is_running = True
         self.run_btn.configure(state="disabled")
 
-        # clear outputs
+        # clear outputs + reset progress
         self.advisor_text.delete("1.0", "end")
         self.facts_text.delete("1.0", "end")
+        self._ui_progress_reset()
+        self._ui_progress("Queued…", 0.0)
 
         def run_worker():
             raw = ""
             facts_block = ""
             try:
+                self._ui_progress("Building facts block…", 25.0)
                 self._ui_set_status("Building facts block…")
 
                 facts_block = build_combined_facts_block(
@@ -353,11 +417,13 @@ class FbaGui(tk.Tk):
                     model=self.model,
                 )
 
+                self._ui_progress("Running model…", 60.0, indeterminate=True)
                 self._ui_set_status("Running model… (can take a bit)")
 
                 raw = run_advisor_text(self.tokenizer, self.model, question, facts_block)
 
-                # Guards on RAW
+                self._ui_progress("Running guards…", 90.0, indeterminate=False)
+
                 ok_nums_raw, extras_raw = check_no_new_numbers(raw, facts_block)
                 if not ok_nums_raw:
                     raise ValueError(f"NUMBER GUARD TRIGGERED (raw): {sorted(extras_raw)}")
@@ -366,17 +432,19 @@ class FbaGui(tk.Tk):
                 if not ok_claims_raw:
                     raise ValueError(f"CLAIM GUARD TRIGGERED (raw): {hits_raw}")
 
+                self._ui_progress("Rendering output…", 97.0)
                 self._ui_fill_outputs(facts_block, raw)
-                self._ui_set_status("Done ✅")
+                self._ui_set_status("Done")
+                self._ui_progress_done()
 
             except Exception as e:
                 err_msg = traceback.format_exc()
-                self._ui_set_status("Run failed ❌")
+                self._ui_set_status("Run failed")
+                self._ui_progress("Run failed", 0.0, indeterminate=False)
 
                 e_msg = str(e)
                 raw_preview = (raw or "")[:1500]
 
-                # Still show what we got, so you can debug without rerunning.
                 self._ui_fill_outputs(facts_block or "", raw or "")
 
                 self.after(

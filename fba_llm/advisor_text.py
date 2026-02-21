@@ -15,6 +15,7 @@ def build_prompt(question: str, facts_block: str) -> str:
         "- If describing frequency, use ONLY: many / some / several / few.\n"
         "- Do NOT use numeric words like half, double, twice, majority, minority.\n"
         "- No code blocks, no markdown fences, no examples.\n\n"
+        "- If REVIEW_THEME_SUMMARY exists, you MUST use its TEXT_PRAISE and TEXT_COMPLAINTS for review analysis."
 
         "OUTPUT FORMAT (exact headers, hyphen bullets only):\n\n"
 

@@ -28,6 +28,56 @@ def _to_float(x: str) -> Optional[float]:
         return None
 
 
+# Reviews theme extraction
+def summarize_reviews_themes(tokenizer, model, full_text: str, max_chars: int = 24000) -> str:
+
+    # Keep prompt size controlled
+    src = full_text[:max_chars]
+
+    prompt = (
+        "You are extracting review themes for an Amazon product.\n"
+        "STRICT RULES:\n"
+        "- Do NOT output any numbers, percentages, ratios, or shares.\n"
+        "- Use ONLY qualitative wording (many/some/several/few) if needed.\n"
+        "- Do NOT output markdown, code blocks, or examples.\n"
+        "- Do NOT mention anything not supported by the review text.\n"
+        "- Be concise.\n\n"
+        "TASK:\n"
+        "From the REVIEWS TEXT, produce TWO sections:\n"
+        "TEXT_PRAISE:\n"
+        "- <short theme>\n"
+        "- <short theme>\n"
+        "- <short theme>\n"
+        "TEXT_COMPLAINTS:\n"
+        "- <short theme>\n"
+        "- <short theme>\n"
+        "- <short theme>\n\n"
+        "REVIEWS TEXT:\n"
+        f"{src}\n\n"
+        "ANSWER:\n"
+    )
+
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=220,
+        min_new_tokens=60,
+        do_sample=False,
+        repetition_penalty=1.08,
+        no_repeat_ngram_size=3,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.eos_token_id,
+        use_cache=True,
+    )
+
+    gen = outputs[0][inputs["input_ids"].shape[-1]:]
+    text = tokenizer.decode(gen, skip_special_tokens=True).strip()
+
+    # Defensive cleanup: if the model starts rambling, hard-stop after complaints section bullets
+    # (keeps it stable for downstream usage)
+    return text
+
+
 def summarize_csv(path: Path, max_rows: int = 2000) -> str:
     with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
         reader = csv.DictReader(f)
@@ -225,14 +275,19 @@ def build_facts_block(
     if suffix == ".txt":
         full = read_txt_full(file_path)
 
+        # Small text: just preview (no model required)
         if len(full) <= txt_chunk_threshold_chars:
             preview = full[:txt_preview_chars]
             return (
                 f"FILE_TYPE: TXT\n"
                 f"FILE_NAME: {file_path.name}\n"
-                f"CONTENT_PREVIEW:\n{preview}"
+                f"CONTENT_PREVIEW:\n{preview}\n\n"
+                f"TEXT_FINDINGS: INSUFFICIENT DATA (text below chunk threshold)\n"
+                f"TEXT_PRAISE: INSUFFICIENT DATA (text below chunk threshold)\n"
+                f"TEXT_COMPLAINTS: INSUFFICIENT DATA (text below chunk threshold)"
             )
 
+        # Large text: require tokenizer/model
         if tokenizer is None or model is None:
             raise ValueError(
                 "Large .txt detected but tokenizer/model not provided to build_facts_block(). "
@@ -240,13 +295,20 @@ def build_facts_block(
             )
 
         findings = extract_text_findings(tokenizer, model, full, ChunkConfig())
+
+        # explicit praise/complaints themes for downstream advisor
+        themes = summarize_reviews_themes(tokenizer, model, full)
+
         return (
             f"FILE_TYPE: TXT\n"
-            f"FILE_NAME: {file_path.name}\n"
-            f"{findings}"
+            f"FILE_NAME: {file_path.name}\n\n"
+            f"{findings}\n\n"
+            f"REVIEW_THEME_SUMMARY (use ONLY these themes; do not invent others):\n"
+            f"{themes}"
         )
 
     raise ValueError(f"Unsupported file type: {suffix}. Use .csv or .txt")
+
 
 def build_combined_facts_block(
     *,
