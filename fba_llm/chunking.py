@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+import re
+from fba_llm.model import get_input_device
 from dataclasses import dataclass
 from typing import List
 
@@ -82,7 +83,9 @@ def extract_text_findings(tokenizer, model, text: str, cfg: ChunkConfig = ChunkC
             "BULLETS:\n- "
         )
 
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        device = get_input_device(model)
+        inputs = tokenizer(prompt, return_tensors="pt")
+        inputs = {k: v.to(device) for k, v in inputs.items()}
         outputs = model.generate(
             **inputs,
             max_new_tokens=160,
@@ -96,18 +99,31 @@ def extract_text_findings(tokenizer, model, text: str, cfg: ChunkConfig = ChunkC
         gen = outputs[0][inputs["input_ids"].shape[-1]:]
         out = tokenizer.decode(gen, skip_special_tokens=True).strip()
 
-        # Normalize into bullets (defensive)
+        # Normalize into bullets (defensive + cleanup)
         for line in out.splitlines():
             line = line.strip()
             if not line:
                 continue
+
+            # drop separator lines
+            if set(line) <= {"-", "_", "="} and len(line) >= 10:
+                continue
+
+            # remove a leading "-" if present
             if line.startswith("-"):
-                b = line[1:].strip()
-            else:
-                # If model forgot "-", treat as bullet anyway
-                b = line.strip()
-            if b:
-                all_bullets.append(b)
+                line = line[1:].strip()
+
+            # remove common numbering like "1." / "2)" / "3 -"
+            line = re.sub(r"^\s*\d+\s*[\.\)\-:]\s*", "", line)
+
+            # trim weird trailing junk
+            line = line.strip(" -•\t")
+
+            # ignore very short fragments
+            if len(line) < 8:
+                continue
+
+            all_bullets.append(line)
 
     # Dedupe while preserving order (simple)
     seen = set()

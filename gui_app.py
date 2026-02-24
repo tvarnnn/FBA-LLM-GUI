@@ -9,8 +9,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from fba_llm.model import find_latest_snapshot, load_model
 from fba_llm.ingest import build_combined_facts_block
-from fba_llm.advisor_text import run_advisor_text
 from fba_llm.guards import check_no_new_numbers, check_no_banned_claims
+from fba_llm.advisor_text import run_advisor_text_strict
 
 # Paths
 ROOT = Path(__file__).resolve().parent
@@ -84,7 +84,7 @@ class FbaGui(tk.Tk):
         super().__init__()
 
         self.title("FBA_LLM – Local Advisor")
-        self.geometry("1050x780")
+        self.geometry("1050x800")
 
         ensure_layout()
 
@@ -99,6 +99,10 @@ class FbaGui(tk.Tk):
         self.clear_old_var = tk.BooleanVar(value=True)
         self.use_metrics_var = tk.BooleanVar(value=True)
         self.use_reviews_var = tk.BooleanVar(value=True)
+
+        # NEW: fast-by-default toggle
+        self.deep_reviews_var = tk.BooleanVar(value=False)
+
         self.dark_mode = tk.BooleanVar(value=True)
 
         self.metrics_label_var = tk.StringVar(value="")
@@ -198,11 +202,18 @@ class FbaGui(tk.Tk):
         ttk.Button(inputs, text="Upload Reviews TXT…", command=self.on_upload_reviews).grid(row=1, column=1, padx=6)
         ttk.Label(inputs, textvariable=self.reviews_label_var).grid(row=1, column=2, sticky="w")
 
+        # NEW: deep review analysis toggle (fast by default)
+        ttk.Checkbutton(
+            inputs,
+            text="Deep review analysis (slower, extracts themes/findings)",
+            variable=self.deep_reviews_var,
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
         ttk.Checkbutton(
             inputs,
             text="When uploading, clear old files in that folder",
             variable=self.clear_old_var,
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         inputs.columnconfigure(2, weight=1)
 
@@ -357,7 +368,7 @@ class FbaGui(tk.Tk):
                 self.model = model
                 self.model_loaded = True
 
-                self._ui_set_status(f"Model loaded({model_path.name})")
+                self._ui_set_status(f"Model loaded ({model_path.name})")
                 self._ui_progress("Model loaded", 100.0, indeterminate=False)
 
             except Exception:
@@ -393,6 +404,7 @@ class FbaGui(tk.Tk):
             return
 
         question = (self.question_var.get() or "").strip() or "Analyze this for FBA viability."
+        deep_reviews = bool(self.deep_reviews_var.get())
 
         self.is_running = True
         self.run_btn.configure(state="disabled")
@@ -415,12 +427,13 @@ class FbaGui(tk.Tk):
                     reviews_txt=reviews_path,
                     tokenizer=self.tokenizer,
                     model=self.model,
+                    deep_review_analysis=deep_reviews,  # NEW
                 )
 
                 self._ui_progress("Running model…", 60.0, indeterminate=True)
                 self._ui_set_status("Running model… (can take a bit)")
 
-                raw = run_advisor_text(self.tokenizer, self.model, question, facts_block)
+                raw = run_advisor_text_strict(self.tokenizer, self.model, question, facts_block)
 
                 self._ui_progress("Running guards…", 90.0, indeterminate=False)
 
