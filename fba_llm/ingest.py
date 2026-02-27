@@ -4,10 +4,10 @@ import csv
 import statistics
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
-from fba_llm.chunking import extract_text_findings, ChunkConfig
-from fba_llm.model import get_input_device
+from fba_llm.llm_backend import generate_text
+from fba_llm.chunking import ChunkConfig, chunk_text, select_chunks_evenly
 
 
 def _dedupe_lines(text: str, *, max_unique_lines: int = 4000) -> str:
@@ -45,15 +45,16 @@ def _to_float(x: str) -> Optional[float]:
         return None
 
 
+# --------------------------
+# Theme block validation/sanitize
+# --------------------------
 def _looks_valid_theme_block(t: str) -> bool:
     t = (t or "").strip()
     if "TEXT_PRAISE:" not in t or "TEXT_COMPLAINTS:" not in t:
         return False
-    # require at least 6 hyphen bullets
     bullets = [ln for ln in t.splitlines() if ln.strip().startswith("-")]
     if len(bullets) < 6:
         return False
-    # reject placeholder templates
     bad_markers = ["<short theme", "<theme>", "short theme"]
     low = t.lower()
     if any(b in low for b in bad_markers):
@@ -63,7 +64,7 @@ def _looks_valid_theme_block(t: str) -> bool:
 
 def _sanitize_theme_block(t: str) -> str:
     """
-    Try to coerce slightly-wrong outputs into the exact format:
+    Coerce slightly-wrong outputs into EXACT format:
     TEXT_PRAISE:
     - ...
     - ...
@@ -72,26 +73,22 @@ def _sanitize_theme_block(t: str) -> str:
     - ...
     - ...
     - ...
-    If it can't be sanitized reliably, caller should use fallback.
     """
     t = (t or "").strip()
     if not t:
         return ""
 
-    # Normalize header variants (common misspellings)
-    # Keep it conservative: only fix obvious ones.
+    # Normalize common header variants
     t = re.sub(r"(?im)^\s*text\s*prai?ze\s*:\s*$", "TEXT_PRAISE:", t)
     t = re.sub(r"(?im)^\s*text\s*praise\s*:\s*$", "TEXT_PRAISE:", t)
     t = re.sub(r"(?im)^\s*text\s*complaints?\s*:\s*$", "TEXT_COMPLAINTS:", t)
 
-    # Ensure headers exist; if not, bail
     if "TEXT_PRAISE:" not in t or "TEXT_COMPLAINTS:" not in t:
         return ""
 
     lines = [ln.rstrip() for ln in t.splitlines()]
 
-    # Keep only lines that are headers or bullets
-    kept = []
+    kept: List[str] = []
     for ln in lines:
         s = ln.strip()
         if not s:
@@ -104,14 +101,11 @@ def _sanitize_theme_block(t: str) -> str:
             continue
 
     t2 = "\n".join(kept).strip()
-
-    # Quick structural check: headers in correct order
     if not re.search(r"(?s)TEXT_PRAISE:.*TEXT_COMPLAINTS:", t2):
         return ""
 
-    # Count bullets in each section; require 3+3
-    praise = []
-    complaints = []
+    praise: List[str] = []
+    complaints: List[str] = []
     section = None
     for ln in t2.splitlines():
         if ln == "TEXT_PRAISE:":
@@ -132,7 +126,6 @@ def _sanitize_theme_block(t: str) -> str:
     if len(praise) < 3 or len(complaints) < 3:
         return ""
 
-    # Truncate to exactly 3 + 3
     praise = praise[:3]
     complaints = complaints[:3]
 
@@ -148,7 +141,10 @@ def _sanitize_theme_block(t: str) -> str:
     )
 
 
-def summarize_reviews_themes(tokenizer, model, full_text: str, max_chars: int = 24000) -> str:
+# --------------------------
+# API-based review analysis
+# --------------------------
+def summarize_reviews_themes(full_text: str, *, max_chars: int = 24000) -> str:
     src = full_text[:max_chars]
 
     prompt = (
@@ -174,35 +170,15 @@ def summarize_reviews_themes(tokenizer, model, full_text: str, max_chars: int = 
         "ANSWER:\n"
     )
 
-    device = get_input_device(model)
-    inputs = tokenizer(prompt, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    text = generate_text(prompt, max_tokens=260, temperature=0.2).strip()
 
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=220,
-        min_new_tokens=80,
-        do_sample=False,
-        repetition_penalty=1.10,
-        no_repeat_ngram_size=3,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.eos_token_id,
-        use_cache=True,
-    )
-
-    gen = outputs[0][inputs["input_ids"].shape[-1]:]
-    text = tokenizer.decode(gen, skip_special_tokens=True).strip()
-
-    # Try sanitize first
     sanitized = _sanitize_theme_block(text)
     if sanitized and _looks_valid_theme_block(sanitized):
         return sanitized
 
-    # If original is valid, accept it
     if _looks_valid_theme_block(text):
         return text
 
-    # Otherwise fallback
     return (
         "TEXT_PRAISE:\n"
         "- INSUFFICIENT DATA\n"
@@ -215,6 +191,79 @@ def summarize_reviews_themes(tokenizer, model, full_text: str, max_chars: int = 
     )
 
 
+def extract_text_findings_api(text: str, cfg: ChunkConfig = ChunkConfig()) -> str:
+    chunks = chunk_text(text, cfg.chunk_size, cfg.overlap)
+    chunks = select_chunks_evenly(chunks, cfg.max_chunks)
+
+    if not chunks:
+        return "TEXT_FINDINGS:\n- INSUFFICIENT DATA"
+
+    all_bullets: List[str] = []
+
+    for idx, ch in enumerate(chunks, start=1):
+        prompt = (
+            "You are extracting evidence from customer reviews.\n"
+            "RULES (STRICT):\n"
+            "- Use ONLY the provided TEXT CHUNK.\n"
+            "- Do NOT add facts not present.\n"
+            "- Hyphen bullets only. No numbered lists.\n"
+            "- Do NOT output any numbers unless that exact number appears in the TEXT CHUNK.\n"
+            "- Focus on actionable themes: complaints, praise, defects, shipping/packaging issues, durability, materials.\n"
+            "- Do NOT infer or estimate percentages/ratios/shares.\n"
+            "- Use qualitative frequency words only: many/some/several/few.\n"
+            f"- Output at most {cfg.max_bullets_per_chunk} bullets.\n\n"
+            f"TEXT CHUNK {idx}/{len(chunks)}:\n{ch}\n\n"
+            "BULLETS:\n"
+        )
+
+        out = generate_text(prompt, max_tokens=220, temperature=0.2)
+        out = (out or "").strip()
+
+        for line in out.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+
+            # drop separator lines
+            if set(s) <= {"-", "_", "="} and len(s) >= 10:
+                continue
+
+            # require bullets; if model forgets, coerce
+            if s.startswith("-"):
+                s = s[1:].strip()
+
+            # remove common numbering like "1." / "2)" / "3 -"
+            s = re.sub(r"^\s*\d+\s*[\.\)\-:]\s*", "", s)
+
+            s = s.strip(" -•\t")
+            if len(s) < 8:
+                continue
+
+            all_bullets.append(s)
+
+    # Dedupe while preserving order
+    seen = set()
+    deduped: List[str] = []
+    for b in all_bullets:
+        key = b.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(b)
+        if len(deduped) >= cfg.max_total_bullets:
+            break
+
+    if not deduped:
+        return "TEXT_FINDINGS:\n- INSUFFICIENT DATA"
+
+    lines = ["TEXT_FINDINGS:"]
+    lines += [f"- {b}" for b in deduped]
+    return "\n".join(lines)
+
+
+# --------------------------
+# CSV summarization (unchanged logic)
+# --------------------------
 def summarize_csv(path: Path, max_rows: int = 2000) -> str:
     with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
         reader = csv.DictReader(f)
@@ -317,22 +366,10 @@ def summarize_csv(path: Path, max_rows: int = 2000) -> str:
             return mid_label
         return high_label
 
-    price_competition = band_label(
-        price_spread_pct, 15.0, 30.0,
-        "LOW (tight pricing band)", "MEDIUM", "HIGH (price war risk)"
-    )
-    quality_consistency = band_label(
-        rating_spread, 0.30, 0.60,
-        "STABLE", "MIXED", "VOLATILE"
-    )
-    review_concentration = band_label(
-        review_dominance, 1.50, 2.50,
-        "FRAGMENTED (no single dominant listing)", "MODERATE", "DOMINANT (top listing likely hard to beat)"
-    )
-    shipping_complexity = band_label(
-        weight_avg, 1.50, 3.00,
-        "LIGHT", "MEDIUM", "HEAVY"
-    )
+    price_competition = band_label(price_spread_pct, 15.0, 30.0, "LOW (tight pricing band)", "MEDIUM", "HIGH (price war risk)")
+    quality_consistency = band_label(rating_spread, 0.30, 0.60, "STABLE", "MIXED", "VOLATILE")
+    review_concentration = band_label(review_dominance, 1.50, 2.50, "FRAGMENTED (no single dominant listing)", "MODERATE", "DOMINANT (top listing likely hard to beat)")
+    shipping_complexity = band_label(weight_avg, 1.50, 3.00, "LIGHT", "MEDIUM", "HEAVY")
 
     sample_confidence = "LOW (very small sample)" if row_count < 20 else "MEDIUM/HIGH (larger sample)"
 
@@ -390,10 +427,11 @@ def summarize_csv(path: Path, max_rows: int = 2000) -> str:
     return "\n".join(lines)
 
 
+# --------------------------
+# Facts blocks
+# --------------------------
 def build_facts_block(
     file_path: Path,
-    tokenizer=None,
-    model=None,
     *,
     txt_preview_chars: int = 6000,
     deep_review_analysis: bool = False,
@@ -405,10 +443,8 @@ def build_facts_block(
         return summarize_csv(file_path)
 
     if suffix == ".txt":
-        full = read_txt_full(file_path)
-        full = _dedupe_lines(full)
+        full = _dedupe_lines(read_txt_full(file_path))
 
-        # FAST PATH (default): preview only (NO model calls)
         if not deep_review_analysis:
             preview = full[:txt_preview_chars]
             return (
@@ -420,14 +456,9 @@ def build_facts_block(
                 f"TEXT_COMPLAINTS: SKIPPED (deep_review_analysis disabled)"
             )
 
-        # DEEP PATH: requires tokenizer/model
-        if tokenizer is None or model is None:
-            raise ValueError("deep_review_analysis=True but tokenizer/model not provided.")
-
         src = full[:deep_max_chars]
-
-        findings = extract_text_findings(tokenizer, model, src, ChunkConfig())
-        themes = summarize_reviews_themes(tokenizer, model, src)
+        findings = extract_text_findings_api(src, ChunkConfig())
+        themes = summarize_reviews_themes(src)
 
         preview = src[:txt_preview_chars]
         return (
@@ -446,8 +477,6 @@ def build_combined_facts_block(
     *,
     metrics_csv: Optional[Path] = None,
     reviews_txt: Optional[Path] = None,
-    tokenizer=None,
-    model=None,
     deep_review_analysis: bool = False,
 ) -> str:
     sections: list[str] = []
@@ -465,8 +494,6 @@ def build_combined_facts_block(
             raise FileNotFoundError(f"Reviews TXT not found: {reviews_txt}")
         txt_block = build_facts_block(
             reviews_txt,
-            tokenizer=tokenizer,
-            model=model,
             deep_review_analysis=deep_review_analysis,
         )
         add_section("REVIEWS", txt_block)
