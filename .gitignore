@@ -1,35 +1,39 @@
-# ---- Python ----
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.egg-info/
-.venv/
 
-# ---- OS ----
+# Virtual environments
+.venv/
+venv/
+
+# Environment variables / secrets
+.env
+.env.*
+*.env
+
+# OS / IDE
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
 
-# ---- Models / LLM artifacts ----
+# Local models & ML artifacts
 models/
 **/models/
-**/snapshots/
 **/*.bin
 **/*.safetensors
 **/*.pt
 **/*.ckpt
+**/snapshots/
 
-# ---- HuggingFace cache ----
+
+# HuggingFace / cache
 .cache/
 huggingface/
 **/huggingface/
 
-# ---- Large data ----
-inputs/Reviews/*.txt
-inputs/Metrics/*.csv
-
-# ---- Example data ----
-inputs/Metrics/test_metrics.csv
-inputs/Reviews/test_reviews.txt
-
-.idea/
+# Runtime inputs (not source code)
+inputs/

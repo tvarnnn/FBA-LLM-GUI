@@ -4,18 +4,14 @@ from pathlib import Path
 import argparse
 import sys
 
-from fba_llm.model import find_latest_snapshot, load_model
 from fba_llm.ingest import build_combined_facts_block
-from fba_llm.advisor_text import run_advisor_text
+from fba_llm.advisor_text import run_advisor_text_strict
 from fba_llm.guards import check_no_new_numbers, check_no_banned_claims
 
 ROOT = Path(__file__).resolve().parent
-
 INPUTS_DIR = ROOT / "inputs"
 METRICS_DIR = INPUTS_DIR / "Metrics"
 REVIEWS_DIR = INPUTS_DIR / "Reviews"
-
-DEFAULT_CACHE_ROOT = ROOT / "models" / "llama-2-7b-hf"
 
 
 def eprint(*args, **kwargs):
@@ -47,16 +43,14 @@ def pick_latest_file(folder: Path, exts: tuple[str, ...], label: str) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="FBA_LLM CLI runner (raw advisory output).")
-
+    p = argparse.ArgumentParser(description="FBA_LLM CLI runner (API-based advisory output).")
     p.add_argument("--question", default="Analyze this for FBA viability.")
     p.add_argument("--metrics-file", default=None)
     p.add_argument("--reviews-file", default=None)
     p.add_argument("--no-metrics", action="store_true")
     p.add_argument("--no-reviews", action="store_true")
-    p.add_argument("--cache-root", default=str(DEFAULT_CACHE_ROOT))
-    p.add_argument("--facts-preview", type=int, default=600)
-
+    p.add_argument("--facts-preview", type=int, default=800)
+    p.add_argument("--deep-reviews", action="store_true", help="Extract themes/findings from review text (slower).")
     return p.parse_args()
 
 
@@ -85,17 +79,10 @@ def main() -> int:
         eprint("No inputs enabled.")
         return 1
 
-    cache_root = Path(args.cache_root).expanduser().resolve()
-    model_path = find_latest_snapshot(cache_root)
-
-    eprint(f"Using model snapshot: {model_path.name}")
-    tokenizer, model = load_model(model_path)
-
     facts_block = build_combined_facts_block(
         metrics_csv=metrics_path,
         reviews_txt=reviews_path,
-        tokenizer=tokenizer,
-        model=model,
+        deep_review_analysis=args.deep_reviews,
     )
 
     if args.facts_preview > 0:
@@ -103,9 +90,8 @@ def main() -> int:
         eprint(facts_block[: args.facts_preview])
         eprint("--- END FACTS BLOCK ---\n")
 
-    raw = run_advisor_text(tokenizer, model, args.question, facts_block)
+    raw = run_advisor_text_strict(args.question, facts_block)
 
-    # Guards (RAW ONLY)
     ok_nums, extras = check_no_new_numbers(raw, facts_block)
     if not ok_nums:
         eprint("NUMBER GUARD TRIGGERED:")
@@ -118,11 +104,9 @@ def main() -> int:
         eprint(hits)
         return 3
 
-    # Final output (human-readable)
     print("\n=== FBA ADVISOR OUTPUT ===\n")
     print(raw.strip())
     print("\n=== END OUTPUT ===")
-
     return 0
 
 

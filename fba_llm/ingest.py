@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import csv
-import statistics
 import re
+import statistics
 from pathlib import Path
 from typing import Optional, List
 
 from fba_llm.llm_backend import generate_text
-from fba_llm.chunking import ChunkConfig, chunk_text, select_chunks_evenly
+from fba_llm.chunking import ChunkConfig
 
 
 def _dedupe_lines(text: str, *, max_unique_lines: int = 4000) -> str:
@@ -45,9 +45,8 @@ def _to_float(x: str) -> Optional[float]:
         return None
 
 
-# --------------------------
+
 # Theme block validation/sanitize
-# --------------------------
 def _looks_valid_theme_block(t: str) -> bool:
     t = (t or "").strip()
     if "TEXT_PRAISE:" not in t or "TEXT_COMPLAINTS:" not in t:
@@ -63,22 +62,10 @@ def _looks_valid_theme_block(t: str) -> bool:
 
 
 def _sanitize_theme_block(t: str) -> str:
-    """
-    Coerce slightly-wrong outputs into EXACT format:
-    TEXT_PRAISE:
-    - ...
-    - ...
-    - ...
-    TEXT_COMPLAINTS:
-    - ...
-    - ...
-    - ...
-    """
     t = (t or "").strip()
     if not t:
         return ""
 
-    # Normalize common header variants
     t = re.sub(r"(?im)^\s*text\s*prai?ze\s*:\s*$", "TEXT_PRAISE:", t)
     t = re.sub(r"(?im)^\s*text\s*praise\s*:\s*$", "TEXT_PRAISE:", t)
     t = re.sub(r"(?im)^\s*text\s*complaints?\s*:\s*$", "TEXT_COMPLAINTS:", t)
@@ -141,11 +128,9 @@ def _sanitize_theme_block(t: str) -> str:
     )
 
 
-# --------------------------
 # API-based review analysis
-# --------------------------
 def summarize_reviews_themes(full_text: str, *, max_chars: int = 24000) -> str:
-    src = full_text[:max_chars]
+    src = (full_text or "")[:max_chars]
 
     prompt = (
         "You are extracting review themes for an Amazon product.\n"
@@ -170,7 +155,7 @@ def summarize_reviews_themes(full_text: str, *, max_chars: int = 24000) -> str:
         "ANSWER:\n"
     )
 
-    text = generate_text(prompt, max_tokens=260, temperature=0.2).strip()
+    text = (generate_text(prompt, max_tokens=260, temperature=0.0, timeout_s=90) or "").strip()
 
     sanitized = _sanitize_theme_block(text)
     if sanitized and _looks_valid_theme_block(sanitized):
@@ -192,78 +177,70 @@ def summarize_reviews_themes(full_text: str, *, max_chars: int = 24000) -> str:
 
 
 def extract_text_findings_api(text: str, cfg: ChunkConfig = ChunkConfig()) -> str:
-    chunks = chunk_text(text, cfg.chunk_size, cfg.overlap)
-    chunks = select_chunks_evenly(chunks, cfg.max_chunks)
-
-    if not chunks:
+    src = (text or "")[: (cfg.chunk_size * cfg.max_chunks)]
+    if not src.strip():
         return "TEXT_FINDINGS:\n- INSUFFICIENT DATA"
 
-    all_bullets: List[str] = []
+    prompt = (
+        "You are extracting evidence from customer reviews.\n"
+        "RULES (STRICT):\n"
+        "- Use ONLY the provided REVIEWS TEXT.\n"
+        "- Do NOT add facts not present.\n"
+        "- Hyphen bullets only. No numbered lists.\n"
+        "- Do NOT output any numbers unless that exact number appears in the REVIEWS TEXT.\n"
+        "- Focus on actionable themes: complaints, praise, defects, shipping/packaging issues, durability, materials.\n"
+        "- Do NOT infer or estimate percentages/ratios/shares.\n"
+        "- Use qualitative frequency words only: many/some/several/few.\n"
+        f"- Output at most {cfg.max_total_bullets} bullets.\n\n"
+        "Output format:\n"
+        "TEXT_FINDINGS:\n"
+        "- <bullet>\n"
+        "- <bullet>\n\n"
+        "REVIEWS TEXT:\n"
+        f"{src}\n\n"
+        "ANSWER:\n"
+    )
 
-    for idx, ch in enumerate(chunks, start=1):
-        prompt = (
-            "You are extracting evidence from customer reviews.\n"
-            "RULES (STRICT):\n"
-            "- Use ONLY the provided TEXT CHUNK.\n"
-            "- Do NOT add facts not present.\n"
-            "- Hyphen bullets only. No numbered lists.\n"
-            "- Do NOT output any numbers unless that exact number appears in the TEXT CHUNK.\n"
-            "- Focus on actionable themes: complaints, praise, defects, shipping/packaging issues, durability, materials.\n"
-            "- Do NOT infer or estimate percentages/ratios/shares.\n"
-            "- Use qualitative frequency words only: many/some/several/few.\n"
-            f"- Output at most {cfg.max_bullets_per_chunk} bullets.\n\n"
-            f"TEXT CHUNK {idx}/{len(chunks)}:\n{ch}\n\n"
-            "BULLETS:\n"
-        )
+    out = (generate_text(prompt, max_tokens=320, temperature=0.0, timeout_s=90) or "").strip()
 
-        out = generate_text(prompt, max_tokens=220, temperature=0.2)
-        out = (out or "").strip()
+    # Normalize + dedupe + cap
+    bullets: List[str] = []
+    for ln in out.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if s.lower().startswith("text_findings"):
+            continue
+        if s.startswith("-"):
+            item = s[1:].strip()
+        else:
+            # If the model forgets hyphens, coerce a bit
+            item = re.sub(r"^\s*\d+\s*[\.\)\-:]\s*", "", s).strip()
 
-        for line in out.splitlines():
-            s = line.strip()
-            if not s:
-                continue
+        item = item.strip(" -•\t")
+        if len(item) < 8:
+            continue
+        bullets.append(item)
 
-            # drop separator lines
-            if set(s) <= {"-", "_", "="} and len(s) >= 10:
-                continue
+    if not bullets:
+        return "TEXT_FINDINGS:\n- INSUFFICIENT DATA"
 
-            # require bullets; if model forgets, coerce
-            if s.startswith("-"):
-                s = s[1:].strip()
-
-            # remove common numbering like "1." / "2)" / "3 -"
-            s = re.sub(r"^\s*\d+\s*[\.\)\-:]\s*", "", s)
-
-            s = s.strip(" -•\t")
-            if len(s) < 8:
-                continue
-
-            all_bullets.append(s)
-
-    # Dedupe while preserving order
     seen = set()
     deduped: List[str] = []
-    for b in all_bullets:
-        key = b.lower()
-        if key in seen:
+    for b in bullets:
+        k = b.lower()
+        if k in seen:
             continue
-        seen.add(key)
+        seen.add(k)
         deduped.append(b)
         if len(deduped) >= cfg.max_total_bullets:
             break
-
-    if not deduped:
-        return "TEXT_FINDINGS:\n- INSUFFICIENT DATA"
 
     lines = ["TEXT_FINDINGS:"]
     lines += [f"- {b}" for b in deduped]
     return "\n".join(lines)
 
-
-# --------------------------
-# CSV summarization (unchanged logic)
-# --------------------------
+# CSV summarization
 def summarize_csv(path: Path, max_rows: int = 2000) -> str:
     with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
         reader = csv.DictReader(f)
@@ -280,7 +257,7 @@ def summarize_csv(path: Path, max_rows: int = 2000) -> str:
             return None
 
         col_asin = col_pick("asin", "ASIN")
-        col_title = col_pick("title", "product_title", "name", "product_name")  # optional
+        col_title = col_pick("title", "product_title", "name", "product_name")
         col_price = col_pick("price", "avg_price", "price_usd")
         col_rating = col_pick("rating", "stars", "avg_rating")
         col_reviews = col_pick("review_count", "reviews", "reviews_count", "rating_count")
@@ -427,9 +404,7 @@ def summarize_csv(path: Path, max_rows: int = 2000) -> str:
     return "\n".join(lines)
 
 
-# --------------------------
 # Facts blocks
-# --------------------------
 def build_facts_block(
     file_path: Path,
     *,
