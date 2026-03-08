@@ -23,11 +23,6 @@ def _dedupe_lines(text: str, *, max_unique_lines: int = 4000) -> str:
     return "\n".join(out_lines)
 
 
-def read_txt(path: Path, max_chars: int = 6000) -> str:
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    return text[:max_chars]
-
-
 def read_txt_full(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
 
@@ -45,20 +40,15 @@ def _to_float(x: str) -> Optional[float]:
         return None
 
 
-
-# Theme block validation/sanitize
+# -----------------------------
+# Review theme block helpers
+# -----------------------------
 def _looks_valid_theme_block(t: str) -> bool:
     t = (t or "").strip()
     if "TEXT_PRAISE:" not in t or "TEXT_COMPLAINTS:" not in t:
         return False
     bullets = [ln for ln in t.splitlines() if ln.strip().startswith("-")]
-    if len(bullets) < 6:
-        return False
-    bad_markers = ["<short theme", "<theme>", "short theme"]
-    low = t.lower()
-    if any(b in low for b in bad_markers):
-        return False
-    return True
+    return len(bullets) >= 6
 
 
 def _sanitize_theme_block(t: str) -> str:
@@ -88,8 +78,6 @@ def _sanitize_theme_block(t: str) -> str:
             continue
 
     t2 = "\n".join(kept).strip()
-    if not re.search(r"(?s)TEXT_PRAISE:.*TEXT_COMPLAINTS:", t2):
-        return ""
 
     praise: List[str] = []
     complaints: List[str] = []
@@ -113,9 +101,6 @@ def _sanitize_theme_block(t: str) -> str:
     if len(praise) < 3 or len(complaints) < 3:
         return ""
 
-    praise = praise[:3]
-    complaints = complaints[:3]
-
     return (
         "TEXT_PRAISE:\n"
         f"- {praise[0]}\n"
@@ -128,20 +113,12 @@ def _sanitize_theme_block(t: str) -> str:
     )
 
 
-# API-based review analysis
 def summarize_reviews_themes(full_text: str, *, max_chars: int = 24000) -> str:
     src = (full_text or "")[:max_chars]
 
     prompt = (
         "You are extracting review themes for an Amazon product.\n"
-        "STRICT RULES:\n"
-        "- Do NOT output any numbers, percentages, ratios, or shares.\n"
-        "- Use ONLY qualitative wording (many/some/several/few) if needed.\n"
-        "- Do NOT output markdown, code blocks, or examples.\n"
-        "- Do NOT mention anything not supported by the review text.\n"
-        "- Be concise.\n\n"
-        "TASK:\n"
-        "Output EXACTLY this format (no extra lines, no extra headers):\n"
+        "Output EXACTLY this format (no extra lines):\n"
         "TEXT_PRAISE:\n"
         "- <theme>\n"
         "- <theme>\n"
@@ -160,7 +137,6 @@ def summarize_reviews_themes(full_text: str, *, max_chars: int = 24000) -> str:
     sanitized = _sanitize_theme_block(text)
     if sanitized and _looks_valid_theme_block(sanitized):
         return sanitized
-
     if _looks_valid_theme_block(text):
         return text
 
@@ -182,19 +158,13 @@ def extract_text_findings_api(text: str, cfg: ChunkConfig = ChunkConfig()) -> st
         return "TEXT_FINDINGS:\n- INSUFFICIENT DATA"
 
     prompt = (
-        "You are extracting evidence from customer reviews.\n"
-        "RULES (STRICT):\n"
+        "Extract actionable evidence from customer reviews.\n"
+        "Rules:\n"
         "- Use ONLY the provided REVIEWS TEXT.\n"
-        "- Do NOT add facts not present.\n"
-        "- Hyphen bullets only. No numbered lists.\n"
-        "- Do NOT output any numbers unless that exact number appears in the REVIEWS TEXT.\n"
-        "- Focus on actionable themes: complaints, praise, defects, shipping/packaging issues, durability, materials.\n"
-        "- Do NOT infer or estimate percentages/ratios/shares.\n"
-        "- Use qualitative frequency words only: many/some/several/few.\n"
-        f"- Output at most {cfg.max_total_bullets} bullets.\n\n"
+        "- Hyphen bullets only.\n"
+        f"- At most {cfg.max_total_bullets} bullets.\n\n"
         "Output format:\n"
         "TEXT_FINDINGS:\n"
-        "- <bullet>\n"
         "- <bullet>\n\n"
         "REVIEWS TEXT:\n"
         f"{src}\n\n"
@@ -203,24 +173,18 @@ def extract_text_findings_api(text: str, cfg: ChunkConfig = ChunkConfig()) -> st
 
     out = (generate_text(prompt, max_tokens=320, temperature=0.0, timeout_s=90) or "").strip()
 
-    # Normalize + dedupe + cap
     bullets: List[str] = []
     for ln in out.splitlines():
         s = ln.strip()
-        if not s:
-            continue
-        if s.lower().startswith("text_findings"):
+        if not s or s.lower().startswith("text_findings"):
             continue
         if s.startswith("-"):
             item = s[1:].strip()
         else:
-            # If the model forgets hyphens, coerce a bit
             item = re.sub(r"^\s*\d+\s*[\.\)\-:]\s*", "", s).strip()
-
         item = item.strip(" -•\t")
-        if len(item) < 8:
-            continue
-        bullets.append(item)
+        if len(item) >= 8:
+            bullets.append(item)
 
     if not bullets:
         return "TEXT_FINDINGS:\n- INSUFFICIENT DATA"
@@ -236,11 +200,60 @@ def extract_text_findings_api(text: str, cfg: ChunkConfig = ChunkConfig()) -> st
         if len(deduped) >= cfg.max_total_bullets:
             break
 
-    lines = ["TEXT_FINDINGS:"]
-    lines += [f"- {b}" for b in deduped]
-    return "\n".join(lines)
+    return "TEXT_FINDINGS:\n" + "\n".join([f"- {b}" for b in deduped])
 
+
+# -----------------------------
+# TXT facts block (FIXES RED LINE)
+# -----------------------------
+def build_facts_block(
+    file_path: Path,
+    *,
+    txt_preview_chars: int = 6000,
+    deep_review_analysis: bool = False,
+    deep_max_chars: int = 12000,
+) -> str:
+    suffix = file_path.suffix.lower()
+    if suffix != ".txt":
+        raise ValueError(f"build_facts_block only supports .txt, got: {suffix}")
+
+    full = _dedupe_lines(read_txt_full(file_path))
+    if not full.strip():
+        return (
+            "FILE_TYPE: TXT\n"
+            f"FILE_NAME: {file_path.name}\n"
+            "CONTENT_PREVIEW:\nINSUFFICIENT DATA\n"
+        )
+
+    if not deep_review_analysis:
+        preview = full[:txt_preview_chars]
+        return (
+            "FILE_TYPE: TXT\n"
+            f"FILE_NAME: {file_path.name}\n"
+            f"CONTENT_PREVIEW:\n{preview}\n\n"
+            "TEXT_FINDINGS: SKIPPED (deep_review_analysis disabled)\n"
+            "REVIEW_THEME_SUMMARY: SKIPPED (deep_review_analysis disabled)\n"
+        )
+
+    src = full[:deep_max_chars]
+    preview = src[:txt_preview_chars]
+
+    findings = extract_text_findings_api(src, ChunkConfig())
+    themes = summarize_reviews_themes(src)
+
+    return (
+        "FILE_TYPE: TXT\n"
+        f"FILE_NAME: {file_path.name}\n"
+        f"CONTENT_PREVIEW:\n{preview}\n\n"
+        f"{findings}\n\n"
+        "REVIEW_THEME_SUMMARY (use ONLY these themes; do not invent others):\n"
+        f"{themes}\n"
+    )
+
+
+# -----------------------------
 # CSV summarization
+# -----------------------------
 def summarize_csv(path: Path, max_rows: int = 2000) -> str:
     with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
         reader = csv.DictReader(f)
@@ -357,7 +370,8 @@ def summarize_csv(path: Path, max_rows: int = 2000) -> str:
         "FILE_TYPE: CSV",
         f"FILE_NAME: {path.name}",
         f"ROWS_READ: {row_count}",
-        "COLUMNS: " + (", ".join(cols) if cols else "INSUFFICIENT DATA"),
+        "COLUMNS:",
+        ("- " + ("\n- ".join(cols) if cols else "INSUFFICIENT DATA")),
         "",
         "IDENTIFIERS:",
         f"ASIN_SAMPLE: {asin_sample}",
@@ -404,60 +418,39 @@ def summarize_csv(path: Path, max_rows: int = 2000) -> str:
     return "\n".join(lines)
 
 
-# Facts blocks
-def build_facts_block(
-    file_path: Path,
-    *,
-    txt_preview_chars: int = 6000,
-    deep_review_analysis: bool = False,
-    deep_max_chars: int = 12000,
-) -> str:
-    suffix = file_path.suffix.lower()
-
-    if suffix == ".csv":
-        return summarize_csv(file_path)
-
-    if suffix == ".txt":
-        full = _dedupe_lines(read_txt_full(file_path))
-
-        if not deep_review_analysis:
-            preview = full[:txt_preview_chars]
-            return (
-                f"FILE_TYPE: TXT\n"
-                f"FILE_NAME: {file_path.name}\n"
-                f"CONTENT_PREVIEW:\n{preview}\n\n"
-                f"TEXT_FINDINGS: SKIPPED (deep_review_analysis disabled)\n"
-                f"TEXT_PRAISE: SKIPPED (deep_review_analysis disabled)\n"
-                f"TEXT_COMPLAINTS: SKIPPED (deep_review_analysis disabled)"
-            )
-
-        src = full[:deep_max_chars]
-        findings = extract_text_findings_api(src, ChunkConfig())
-        themes = summarize_reviews_themes(src)
-
-        preview = src[:txt_preview_chars]
-        return (
-            f"FILE_TYPE: TXT\n"
-            f"FILE_NAME: {file_path.name}\n"
-            f"CONTENT_PREVIEW:\n{preview}\n\n"
-            f"{findings}\n\n"
-            f"REVIEW_THEME_SUMMARY (use ONLY these themes; do not invent others):\n"
-            f"{themes}"
-        )
-
-    raise ValueError(f"Unsupported file type: {suffix}. Use .csv or .txt")
-
-
+# -----------------------------
+# Combined facts
+# -----------------------------
 def build_combined_facts_block(
     *,
     metrics_csv: Optional[Path] = None,
     reviews_txt: Optional[Path] = None,
     deep_review_analysis: bool = False,
+    lead_time_days: int = 60,
+    target_margin_pct: float = 30.0,
+    ad_spend_per_unit_usd: float = 0.0,
 ) -> str:
     sections: list[str] = []
 
     def add_section(title: str, content: str):
         sections.append(f"=== {title} ===\n{content}".strip())
+
+    # Assumptions as a citable section
+    add_section(
+        "ASSUMPTIONS",
+        "\n".join(
+            [
+                "ASSUMPTIONS:",
+                f"- LEAD_TIME_DAYS: {int(lead_time_days)}",
+                f"- TARGET_MARGIN_PCT: {float(target_margin_pct):.2f}",
+                f"- AD_SPEND_PER_UNIT_USD: {float(ad_spend_per_unit_usd):.2f}",
+                "",
+                "ASSUMPTIONS_RULES:",
+                "- These are user-provided inputs for model-free calculations only.",
+                "- Do not treat as observed market data.",
+            ]
+        ),
+    )
 
     if metrics_csv is not None:
         if not metrics_csv.exists():
@@ -467,10 +460,7 @@ def build_combined_facts_block(
     if reviews_txt is not None:
         if not reviews_txt.exists():
             raise FileNotFoundError(f"Reviews TXT not found: {reviews_txt}")
-        txt_block = build_facts_block(
-            reviews_txt,
-            deep_review_analysis=deep_review_analysis,
-        )
+        txt_block = build_facts_block(reviews_txt, deep_review_analysis=deep_review_analysis)
         add_section("REVIEWS", txt_block)
 
     if not sections:

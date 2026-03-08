@@ -13,15 +13,16 @@ import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from fba_llm.ingest import build_combined_facts_block
-from fba_llm.guards import check_no_new_numbers, check_no_banned_claims
-from fba_llm.advisor_text import run_advisor_text_strict
+from fba_llm.analysis import Assumptions
+from fba_llm.analysis_session import AnalysisSession
 from fba_llm.llm_backend import generate_text
+
 # Paths
 ROOT = Path(__file__).resolve().parent
 INPUTS_DIR = ROOT / "inputs"
 METRICS_DIR = INPUTS_DIR / "Metrics"
 REVIEWS_DIR = INPUTS_DIR / "Reviews"
+IMAGES_DIR = INPUTS_DIR / "Images"
 
 # Dark theme colors
 DARK = {
@@ -50,6 +51,7 @@ LIGHT = {
 def ensure_layout():
     METRICS_DIR.mkdir(parents=True, exist_ok=True)
     REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def pick_latest_file(folder: Path, exts: tuple[str, ...]) -> Path | None:
@@ -85,25 +87,38 @@ class FbaGui(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title("FBA_LLM – Advisor (API)")
-        self.geometry("1050x820")
+        self.title("FBA_LLM – Research Copilot")
+        self.geometry("1180x940")
 
         ensure_layout()
 
+        # Session state
+        self.session: AnalysisSession | None = None
+
         # UI state vars
-        self.question_var = tk.StringVar(value="Analyze this for FBA viability.")
+        self.question_var = tk.StringVar(value="Give a cautious screening summary based only on the provided data.")
+        self.followup_var = tk.StringVar(value="")
         self.clear_old_var = tk.BooleanVar(value=True)
+
         self.use_metrics_var = tk.BooleanVar(value=True)
         self.use_reviews_var = tk.BooleanVar(value=True)
-        self.deep_reviews_var = tk.BooleanVar(value=False)
+        self.use_png_var = tk.BooleanVar(value=True)
+
+        self.deep_reviews_var = tk.BooleanVar(value=True)
         self.dark_mode = tk.BooleanVar(value=True)
 
-        # NEW: provider selection
+        # Provider selection
         self.provider_var = tk.StringVar(value=(os.getenv("LLM_PROVIDER") or "groq").strip().lower())
         self.model_override_var = tk.StringVar(value="")  # optional override
 
+        # Assumptions controls
+        self.lead_time_days_var = tk.StringVar(value="60")
+        self.target_margin_pct_var = tk.StringVar(value="30")
+        self.ad_spend_per_unit_var = tk.StringVar(value="0")
+
         self.metrics_label_var = tk.StringVar(value="")
         self.reviews_label_var = tk.StringVar(value="")
+        self.png_label_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready.")
 
         # Progress UI vars
@@ -152,7 +167,10 @@ class FbaGui(tk.Tk):
 
         style.configure("TProgressbar", troughcolor=palette["panel"])
 
-        for t in (getattr(self, "advisor_text", None), getattr(self, "facts_text", None)):
+        for t in (
+            getattr(self, "advisor_text", None),
+            getattr(self, "facts_text", None),
+        ):
             if t is None:
                 continue
             t.configure(
@@ -182,6 +200,34 @@ class FbaGui(tk.Tk):
             if override:
                 os.environ["ANTHROPIC_MODEL"] = override
 
+    def _parse_assumptions(self) -> Assumptions:
+        def to_int(s: str, default: int) -> int:
+            try:
+                return int(str(s).strip())
+            except Exception:
+                return default
+
+        def to_float(s: str, default: float) -> float:
+            try:
+                return float(str(s).strip())
+            except Exception:
+                return default
+
+        lead = to_int(self.lead_time_days_var.get(), 60)
+        lead = max(1, min(lead, 180))
+
+        margin = to_float(self.target_margin_pct_var.get(), 30.0)
+        margin = max(-50.0, min(margin, 90.0))
+
+        ad = to_float(self.ad_spend_per_unit_var.get(), 0.0)
+        ad = max(0.0, min(ad, 9999.0))
+
+        return Assumptions(
+            lead_time_days=lead,
+            target_margin_pct=margin,
+            ad_spend_per_unit=ad,
+        )
+
     # UI Builders
     def _build_ui(self):
         top = ttk.Frame(self, padding=10)
@@ -209,6 +255,20 @@ class FbaGui(tk.Tk):
 
         top.columnconfigure(3, weight=1)
 
+        assumptions = ttk.LabelFrame(self, text="Assumptions (used for computed analysis)", padding=10)
+        assumptions.pack(fill="x", padx=10, pady=(0, 8))
+
+        ttk.Label(assumptions, text="Lead time (days):").grid(row=0, column=0, sticky="w")
+        ttk.Entry(assumptions, textvariable=self.lead_time_days_var, width=10).grid(row=0, column=1, sticky="w", padx=(6, 18))
+
+        ttk.Label(assumptions, text="Target margin (%):").grid(row=0, column=2, sticky="w")
+        ttk.Entry(assumptions, textvariable=self.target_margin_pct_var, width=10).grid(row=0, column=3, sticky="w", padx=(6, 18))
+
+        ttk.Label(assumptions, text="Ad spend / unit ($):").grid(row=0, column=4, sticky="w")
+        ttk.Entry(assumptions, textvariable=self.ad_spend_per_unit_var, width=10).grid(row=0, column=5, sticky="w", padx=(6, 0))
+
+        assumptions.columnconfigure(6, weight=1)
+
         inputs = ttk.LabelFrame(self, text="Inputs", padding=10)
         inputs.pack(fill="x", padx=10, pady=8)
 
@@ -224,29 +284,45 @@ class FbaGui(tk.Tk):
         ttk.Button(inputs, text="Upload Reviews TXT…", command=self.on_upload_reviews).grid(row=1, column=1, padx=6)
         ttk.Label(inputs, textvariable=self.reviews_label_var).grid(row=1, column=2, sticky="w")
 
+        ttk.Checkbutton(inputs, text="Use PNG Evidence", variable=self.use_png_var, command=self._refresh_input_labels).grid(
+            row=2, column=0, sticky="w"
+        )
+        ttk.Button(inputs, text="Upload PNG…", command=self.on_upload_png).grid(row=2, column=1, padx=6)
+        ttk.Label(inputs, textvariable=self.png_label_var).grid(row=2, column=2, sticky="w")
+
         ttk.Checkbutton(
             inputs,
             text="Deep review analysis (slower, extracts themes/findings)",
             variable=self.deep_reviews_var,
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         ttk.Checkbutton(
             inputs,
             text="When uploading, clear old files in that folder",
             variable=self.clear_old_var,
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         inputs.columnconfigure(2, weight=1)
 
-        runbox = ttk.LabelFrame(self, text="Run", padding=10)
+        runbox = ttk.LabelFrame(self, text="Build Screening Summary", padding=10)
         runbox.pack(fill="x", padx=10, pady=8)
 
-        ttk.Label(runbox, text="Question:").grid(row=0, column=0, sticky="w")
+        ttk.Label(runbox, text="Goal:").grid(row=0, column=0, sticky="w")
         ttk.Entry(runbox, textvariable=self.question_var, width=90).grid(row=0, column=1, sticky="we", padx=6)
 
-        self.run_btn = ttk.Button(runbox, text="Run Analysis", command=self.on_run)
+        self.run_btn = ttk.Button(runbox, text="Build Analysis", command=self.on_run)
         self.run_btn.grid(row=0, column=2, padx=6)
         runbox.columnconfigure(1, weight=1)
+
+        followup = ttk.LabelFrame(self, text="Ask Follow-up Question", padding=10)
+        followup.pack(fill="x", padx=10, pady=8)
+
+        ttk.Label(followup, text="Question:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(followup, textvariable=self.followup_var, width=90).grid(row=0, column=1, sticky="we", padx=6)
+
+        self.ask_btn = ttk.Button(followup, text="Ask", command=self.on_ask_followup)
+        self.ask_btn.grid(row=0, column=2, padx=6)
+        followup.columnconfigure(1, weight=1)
 
         status = ttk.Frame(self, padding=(10, 0, 10, 6))
         status.pack(fill="x")
@@ -268,7 +344,7 @@ class FbaGui(tk.Tk):
         tabs.pack(fill="both", expand=True, padx=10, pady=10)
 
         self.advisor_text = tk.Text(tabs, wrap="word", font=("Consolas", 11))
-        tabs.add(self.advisor_text, text="Advisor Output")
+        tabs.add(self.advisor_text, text="Analysis Output")
 
         self.facts_text = tk.Text(tabs, wrap="word", font=("Consolas", 10))
         tabs.add(self.facts_text, text="Facts Block (debug)")
@@ -316,6 +392,7 @@ class FbaGui(tk.Tk):
         def do():
             self.is_running = False
             self.run_btn.configure(state="normal")
+            self.ask_btn.configure(state="normal")
             try:
                 self.progress.stop()
             except Exception:
@@ -327,17 +404,22 @@ class FbaGui(tk.Tk):
     def _refresh_input_labels(self):
         m = pick_latest_file(METRICS_DIR, (".csv",))
         r = pick_latest_file(REVIEWS_DIR, (".txt",))
+        p = pick_latest_file(IMAGES_DIR, (".png",))
 
         mtxt = f"Current: {m.name}" if m else "Current: (none)"
         rtxt = f"Current: {r.name}" if r else "Current: (none)"
+        ptxt = f"Current: {p.name}" if p else "Current: (none)"
 
         if not self.use_metrics_var.get():
             mtxt += "  [disabled]"
         if not self.use_reviews_var.get():
             rtxt += "  [disabled]"
+        if not self.use_png_var.get():
+            ptxt += "  [disabled]"
 
         self.metrics_label_var.set(mtxt)
         self.reviews_label_var.set(rtxt)
+        self.png_label_var.set(ptxt)
 
     # Upload handlers
     def on_upload_metrics(self):
@@ -368,7 +450,21 @@ class FbaGui(tk.Tk):
         except Exception as e:
             messagebox.showerror("Upload error", str(e))
 
-    # NEW: API test
+    def on_upload_png(self):
+        path = filedialog.askopenfilename(
+            title="Select PNG",
+            filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            dst = copy_into_folder(Path(path), IMAGES_DIR, clear_existing=self.clear_old_var.get())
+            self._refresh_input_labels()
+            self._ui_set_status(f"Uploaded PNG: {dst.name}")
+        except Exception as e:
+            messagebox.showerror("Upload error", str(e))
+
+    # API test
     def on_test_api(self):
         self._apply_provider_env()
 
@@ -391,7 +487,7 @@ class FbaGui(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # Run pipeline
+    # Build screening summary
     def on_run(self):
         if self.is_running:
             return
@@ -400,12 +496,15 @@ class FbaGui(tk.Tk):
 
         use_metrics = self.use_metrics_var.get()
         use_reviews = self.use_reviews_var.get()
-        if not use_metrics and not use_reviews:
-            messagebox.showinfo("No inputs", "Enable Metrics and/or Reviews.")
+        use_png = self.use_png_var.get()
+
+        if not use_metrics and not use_reviews and not use_png:
+            messagebox.showinfo("No inputs", "Enable Metrics, Reviews, and/or PNG.")
             return
 
         metrics_path = pick_latest_file(METRICS_DIR, (".csv",)) if use_metrics else None
         reviews_path = pick_latest_file(REVIEWS_DIR, (".txt",)) if use_reviews else None
+        png_path = pick_latest_file(IMAGES_DIR, (".png",)) if use_png else None
 
         if use_metrics and metrics_path is None:
             messagebox.showinfo("Missing Metrics", "No .csv found in inputs/Metrics/")
@@ -413,12 +512,17 @@ class FbaGui(tk.Tk):
         if use_reviews and reviews_path is None:
             messagebox.showinfo("Missing Reviews", "No .txt found in inputs/Reviews/")
             return
+        if use_png and png_path is None:
+            messagebox.showinfo("Missing PNG", "No .png found in inputs/Images/")
+            return
 
-        question = (self.question_var.get() or "").strip() or "Analyze this for FBA viability."
+        question = (self.question_var.get() or "").strip() or "Give a cautious screening summary based only on the provided data."
         deep_reviews = bool(self.deep_reviews_var.get())
+        assumptions = self._parse_assumptions()
 
         self.is_running = True
         self.run_btn.configure(state="disabled")
+        self.ask_btn.configure(state="disabled")
 
         self.advisor_text.delete("1.0", "end")
         self.facts_text.delete("1.0", "end")
@@ -426,35 +530,30 @@ class FbaGui(tk.Tk):
         self._ui_progress("Queued…", 0.0)
 
         def run_worker():
-            raw = ""
-            facts_block = ""
             try:
-                self._ui_progress("Building facts block…", 25.0)
-                self._ui_set_status("Building facts block…")
+                self._ui_progress("Building analysis session…", 20.0)
+                self._ui_set_status("Building analysis session…")
 
-                facts_block = build_combined_facts_block(
+                session = AnalysisSession(
+                    question=question,
+                    assumptions=assumptions,
                     metrics_csv=metrics_path,
                     reviews_txt=reviews_path,
+                    png_path=png_path,
                     deep_review_analysis=deep_reviews,
                 )
 
-                self._ui_progress("Calling LLM…", 60.0, indeterminate=True)
-                self._ui_set_status("Calling LLM…")
+                session.build()
 
-                raw = run_advisor_text_strict(question, facts_block)
+                self._ui_progress("Generating screening summary…", 70.0, indeterminate=True)
+                self._ui_set_status("Generating screening summary…")
 
-                self._ui_progress("Running guards…", 90.0, indeterminate=False)
+                summary = session.generate_screening_summary()
 
-                ok_nums_raw, extras_raw = check_no_new_numbers(raw, facts_block)
-                if not ok_nums_raw:
-                    raise ValueError(f"NUMBER GUARD TRIGGERED: {sorted(extras_raw)}")
+                self.session = session
 
-                ok_claims_raw, hits_raw = check_no_banned_claims(raw, facts_block)
-                if not ok_claims_raw:
-                    raise ValueError(f"CLAIM GUARD TRIGGERED: {hits_raw}")
-
-                self._ui_progress("Rendering output…", 97.0)
-                self._ui_fill_outputs(facts_block, raw)
+                self._ui_progress("Rendering output…", 95.0, indeterminate=False)
+                self._ui_fill_outputs(session.facts_block, summary)
                 self._ui_set_status("Done")
                 self._ui_progress_done()
 
@@ -463,19 +562,59 @@ class FbaGui(tk.Tk):
                 self._ui_set_status("Run failed")
                 self._ui_progress("Run failed", 0.0, indeterminate=False)
 
-                raw_preview = (raw or "")[:1500]
-                self._ui_fill_outputs(facts_block or "", raw or "")
-
                 self.after(
                     0,
                     messagebox.showerror,
                     "Run failed",
-                    f"{str(e)}\n\nDetails:\n{err_msg}\n\nRaw (first 1500 chars):\n{raw_preview}",
+                    f"{str(e)}\n\nDetails:\n{err_msg}",
                 )
             finally:
                 self._ui_finish_run()
 
         threading.Thread(target=run_worker, daemon=True).start()
+
+    # Ask follow-up question
+    def on_ask_followup(self):
+        if self.is_running:
+            return
+
+        if self.session is None:
+            messagebox.showinfo("No session", "Build an analysis first.")
+            return
+
+        question = (self.followup_var.get() or "").strip()
+        if not question:
+            messagebox.showinfo("Missing question", "Enter a follow-up question.")
+            return
+
+        self._apply_provider_env()
+
+        self.is_running = True
+        self.run_btn.configure(state="disabled")
+        self.ask_btn.configure(state="disabled")
+
+        self._ui_progress_reset()
+        self._ui_progress("Queued…", 0.0)
+
+        def worker():
+            try:
+                self._ui_set_status("Answering follow-up question…")
+                self._ui_progress("Answering follow-up question…", 60.0, indeterminate=True)
+
+                answer = self.session.ask(question)
+
+                self._ui_fill_outputs(self.session.facts_block, answer)
+                self._ui_set_status("Done")
+                self._ui_progress_done()
+            except Exception:
+                err = traceback.format_exc()
+                self._ui_set_status("Follow-up failed")
+                self._ui_progress("Follow-up failed", 0.0, indeterminate=False)
+                self.after(0, messagebox.showerror, "Follow-up failed", err)
+            finally:
+                self._ui_finish_run()
+
+        threading.Thread(target=worker, daemon=True).start()
 
 
 if __name__ == "__main__":
