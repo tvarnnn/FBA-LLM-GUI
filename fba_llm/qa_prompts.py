@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import List, Dict
+
 
 def build_screening_summary_prompt(question: str, facts_block: str) -> str:
     q = (question or "").strip() or "Analyze this for FBA viability."
@@ -30,8 +32,24 @@ def build_screening_summary_prompt(question: str, facts_block: str) -> str:
     )
 
 
-def build_followup_question_prompt(user_question: str, facts_block: str) -> str:
+def build_followup_question_prompt(
+    user_question: str,
+    facts_block: str,
+    history: List[Dict[str, str]] | None = None,
+) -> str:
     q = (user_question or "").strip() or "What are the biggest risks?"
+
+    history_block = ""
+    if history:
+        lines = ["PRIOR CONVERSATION (for context only — do NOT invent new data from it):"]
+        for i, turn in enumerate(history, 1):
+            role = turn.get("role", "")
+            content = (turn.get("content") or "").strip()
+            if role == "user":
+                lines.append(f"[Q{i}] {content}")
+            elif role == "assistant":
+                lines.append(f"[A{i}] {content}")
+        history_block = "\n".join(lines) + "\n\n"
 
     return (
         "You are an Amazon FBA research copilot.\n"
@@ -50,6 +68,7 @@ def build_followup_question_prompt(user_question: str, facts_block: str) -> str:
         "- Evidence used: <what in the data supports this>\n"
         "- Limitation: <missing data or uncertainty, if relevant>\n"
         "Confidence: <low|medium|high>\n\n"
+        f"{history_block}"
         "INPUT DATA:\n"
         f"{facts_block}\n\n"
         "QUESTION:\n"

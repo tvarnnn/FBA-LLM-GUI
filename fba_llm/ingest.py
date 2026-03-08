@@ -54,8 +54,7 @@ def _sanitize_theme_block(t: str) -> str:
     if not t:
         return ""
 
-    t = re.sub(r"(?im)^\s*text\s*prai?ze\s*:\s*$", "TEXT_PRAISE:", t)
-    t = re.sub(r"(?im)^\s*text\s*praise\s*:\s*$", "TEXT_PRAISE:", t)
+    t = re.sub(r"(?im)^\s*text\s*prai(?:ze|ize|se)\s*:\s*$", "TEXT_PRAISE:", t)
     t = re.sub(r"(?im)^\s*text\s*complaints?\s*:\s*$", "TEXT_COMPLAINTS:", t)
 
     if "TEXT_PRAISE:" not in t or "TEXT_COMPLAINTS:" not in t:

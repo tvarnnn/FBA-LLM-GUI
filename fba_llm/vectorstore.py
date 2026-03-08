@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import List
@@ -7,6 +8,10 @@ from typing import List
 from fba_llm.rag_chunking import Chunk
 
 COLLECTION_NAME = "fba_chunks"
+
+def _get_embed_fn():
+    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction  # type: ignore
+    return SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
 
 def _ensure_dir(p: Path) -> Path:
     p = Path(p)
@@ -36,9 +41,8 @@ def upsert_chunks(persist_dir: Path, chunks: List[Chunk]) -> int:
     try:
         import chromadb
         from chromadb.config import Settings
-        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction  # type: ignore
 
-        embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        embed_fn = _get_embed_fn()
         _ensure_dir(persist_dir)
 
         client = chromadb.PersistentClient(
@@ -74,7 +78,8 @@ def upsert_chunks(persist_dir: Path, chunks: List[Chunk]) -> int:
 
         return len(chunks)
 
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"chromadb upsert failed, falling back to JSONL: {e}")
         return _fallback_upsert(persist_dir, chunks)
 
 def query_chunks(persist_dir: Path, query: str, k: int = 8) -> List[Chunk]:
@@ -83,9 +88,8 @@ def query_chunks(persist_dir: Path, query: str, k: int = 8) -> List[Chunk]:
     try:
         import chromadb
         from chromadb.config import Settings
-        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction  # type: ignore
 
-        embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        embed_fn = _get_embed_fn()
         client = chromadb.PersistentClient(
             path=str(persist_dir),
             settings=Settings(anonymized_telemetry=False),
@@ -114,7 +118,8 @@ def query_chunks(persist_dir: Path, query: str, k: int = 8) -> List[Chunk]:
             )
         return out
 
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"chromadb query failed, falling back to JSONL: {e}")
         # fallback: return last k lines
         p = _fallback_jsonl_path(persist_dir)
         if not p.exists():

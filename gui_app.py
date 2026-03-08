@@ -126,6 +126,7 @@ class FbaGui(tk.Tk):
         self.progress_label_var = tk.StringVar(value="")
 
         self.is_running = False
+        self._cancel_event = threading.Event()
 
         self._build_ui()
         self._apply_theme()
@@ -312,6 +313,10 @@ class FbaGui(tk.Tk):
 
         self.run_btn = ttk.Button(runbox, text="Build Analysis", command=self.on_run)
         self.run_btn.grid(row=0, column=2, padx=6)
+
+        self.cancel_btn = ttk.Button(runbox, text="Cancel", command=self.on_cancel, state="disabled")
+        self.cancel_btn.grid(row=0, column=3, padx=6)
+
         runbox.columnconfigure(1, weight=1)
 
         followup = ttk.LabelFrame(self, text="Ask Follow-up Question", padding=10)
@@ -362,6 +367,16 @@ class FbaGui(tk.Tk):
 
         self.after(0, do)
 
+    def _ui_append_followup(self, question: str, answer: str):
+        def do():
+            sep = "\n\n" + "─" * 60 + "\n"
+            self.advisor_text.insert("end", sep)
+            self.advisor_text.insert("end", f"Q: {question}\n\n")
+            self.advisor_text.insert("end", answer)
+            self.advisor_text.see("end")
+
+        self.after(0, do)
+
     def _ui_progress(self, label: str = "", value: float | None = None, *, indeterminate: bool = False):
         def do():
             self.progress_label_var.set(label or "")
@@ -393,12 +408,19 @@ class FbaGui(tk.Tk):
             self.is_running = False
             self.run_btn.configure(state="normal")
             self.ask_btn.configure(state="normal")
+            self.cancel_btn.configure(state="disabled")
             try:
                 self.progress.stop()
             except Exception:
                 pass
 
         self.after(0, do)
+
+    def on_cancel(self):
+        if self.is_running:
+            self._cancel_event.set()
+            self._ui_set_status("Cancelling... (waiting for API response to return)")
+            self.cancel_btn.configure(state="disabled")
 
     # Input labels
     def _refresh_input_labels(self):
@@ -422,47 +444,25 @@ class FbaGui(tk.Tk):
         self.png_label_var.set(ptxt)
 
     # Upload handlers
-    def on_upload_metrics(self):
-        path = filedialog.askopenfilename(
-            title="Select Metrics CSV",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-        )
+    def _upload_file(self, title: str, filetypes: list, dst_dir: Path, label: str):
+        path = filedialog.askopenfilename(title=title, filetypes=filetypes)
         if not path:
             return
         try:
-            dst = copy_into_folder(Path(path), METRICS_DIR, clear_existing=self.clear_old_var.get())
+            dst = copy_into_folder(Path(path), dst_dir, clear_existing=self.clear_old_var.get())
             self._refresh_input_labels()
-            self._ui_set_status(f"Uploaded metrics: {dst.name}")
+            self._ui_set_status(f"Uploaded {label}: {dst.name}")
         except Exception as e:
             messagebox.showerror("Upload error", str(e))
+
+    def on_upload_metrics(self):
+        self._upload_file("Select Metrics CSV", [("CSV files", "*.csv"), ("All files", "*.*")], METRICS_DIR, "metrics")
 
     def on_upload_reviews(self):
-        path = filedialog.askopenfilename(
-            title="Select Reviews TXT",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            dst = copy_into_folder(Path(path), REVIEWS_DIR, clear_existing=self.clear_old_var.get())
-            self._refresh_input_labels()
-            self._ui_set_status(f"Uploaded reviews: {dst.name}")
-        except Exception as e:
-            messagebox.showerror("Upload error", str(e))
+        self._upload_file("Select Reviews TXT", [("Text files", "*.txt"), ("All files", "*.*")], REVIEWS_DIR, "reviews")
 
     def on_upload_png(self):
-        path = filedialog.askopenfilename(
-            title="Select PNG",
-            filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            dst = copy_into_folder(Path(path), IMAGES_DIR, clear_existing=self.clear_old_var.get())
-            self._refresh_input_labels()
-            self._ui_set_status(f"Uploaded PNG: {dst.name}")
-        except Exception as e:
-            messagebox.showerror("Upload error", str(e))
+        self._upload_file("Select PNG", [("PNG files", "*.png"), ("All files", "*.*")], IMAGES_DIR, "PNG")
 
     # API test
     def on_test_api(self):
@@ -521,8 +521,10 @@ class FbaGui(tk.Tk):
         assumptions = self._parse_assumptions()
 
         self.is_running = True
+        self._cancel_event.clear()
         self.run_btn.configure(state="disabled")
         self.ask_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="normal")
 
         self.advisor_text.delete("1.0", "end")
         self.facts_text.delete("1.0", "end")
@@ -545,10 +547,20 @@ class FbaGui(tk.Tk):
 
                 session.build()
 
+                if self._cancel_event.is_set():
+                    self._ui_set_status("Cancelled.")
+                    self._ui_progress("Cancelled", 0.0, indeterminate=False)
+                    return
+
                 self._ui_progress("Generating screening summary…", 70.0, indeterminate=True)
                 self._ui_set_status("Generating screening summary…")
 
                 summary = session.generate_screening_summary()
+
+                if self._cancel_event.is_set():
+                    self._ui_set_status("Cancelled.")
+                    self._ui_progress("Cancelled", 0.0, indeterminate=False)
+                    return
 
                 self.session = session
 
@@ -558,6 +570,10 @@ class FbaGui(tk.Tk):
                 self._ui_progress_done()
 
             except Exception as e:
+                if self._cancel_event.is_set():
+                    self._ui_set_status("Cancelled.")
+                    self._ui_progress("Cancelled", 0.0, indeterminate=False)
+                    return
                 err_msg = traceback.format_exc()
                 self._ui_set_status("Run failed")
                 self._ui_progress("Run failed", 0.0, indeterminate=False)
@@ -590,8 +606,10 @@ class FbaGui(tk.Tk):
         self._apply_provider_env()
 
         self.is_running = True
+        self._cancel_event.clear()
         self.run_btn.configure(state="disabled")
         self.ask_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="normal")
 
         self._ui_progress_reset()
         self._ui_progress("Queued…", 0.0)
@@ -603,10 +621,19 @@ class FbaGui(tk.Tk):
 
                 answer = self.session.ask(question)
 
-                self._ui_fill_outputs(self.session.facts_block, answer)
+                if self._cancel_event.is_set():
+                    self._ui_set_status("Cancelled.")
+                    self._ui_progress("Cancelled", 0.0, indeterminate=False)
+                    return
+
+                self._ui_append_followup(question, answer)
                 self._ui_set_status("Done")
                 self._ui_progress_done()
             except Exception:
+                if self._cancel_event.is_set():
+                    self._ui_set_status("Cancelled.")
+                    self._ui_progress("Cancelled", 0.0, indeterminate=False)
+                    return
                 err = traceback.format_exc()
                 self._ui_set_status("Follow-up failed")
                 self._ui_progress("Follow-up failed", 0.0, indeterminate=False)

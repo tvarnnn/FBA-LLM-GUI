@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 from fba_llm.analysis import Assumptions
 from fba_llm.ingest import build_combined_facts_block
@@ -27,6 +27,7 @@ class AnalysisSession:
     screening_summary: str = ""
     image_facts_block: str = ""
     built: bool = field(default=False, init=False)
+    history: List[Dict[str, str]] = field(default_factory=list, init=False)
 
     def build(self) -> None:
         base_facts = build_combined_facts_block(
@@ -57,14 +58,26 @@ class AnalysisSession:
     def generate_screening_summary(self) -> str:
         self.ensure_built()
 
+        # Reset history on a fresh screening run
+        self.history = []
+
         prompt = build_screening_summary_prompt(self.question, self.facts_block)
-        out = generate_text(prompt, max_tokens=260, temperature=0.1, timeout_s=90)
+        out = generate_text(prompt, max_tokens=600, temperature=0.1, timeout_s=90)
         self.screening_summary = (out or "").strip()
+
+        self.history.append({"role": "user", "content": self.question})
+        self.history.append({"role": "assistant", "content": self.screening_summary})
+
         return self.screening_summary
 
     def ask(self, user_question: str) -> str:
         self.ensure_built()
 
-        prompt = build_followup_question_prompt(user_question, self.facts_block)
-        out = generate_text(prompt, max_tokens=320, temperature=0.1, timeout_s=90)
-        return (out or "").strip()
+        prompt = build_followup_question_prompt(user_question, self.facts_block, self.history)
+        out = generate_text(prompt, max_tokens=600, temperature=0.1, timeout_s=90)
+        answer = (out or "").strip()
+
+        self.history.append({"role": "user", "content": user_question})
+        self.history.append({"role": "assistant", "content": answer})
+
+        return answer
