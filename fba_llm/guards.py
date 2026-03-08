@@ -5,29 +5,16 @@ from typing import Iterable, Set, Tuple
 
 
 def check_no_new_numbers(text: str, facts_block: str) -> Tuple[bool, Set[str]]:
-    """
-    Your existing implementation likely lives here already.
-    Keep yours if you want. If you removed the strict number guard,
-    you can delete this, but advisor_text.py below no longer requires it.
-    """
-    # --- KEEP YOUR CURRENT IMPLEMENTATION ---
     # Placeholder safe pass-through:
     return True, set()
 
 
 def check_no_banned_claims(text: str, facts_block: str) -> Tuple[bool, list[str]]:
-    """
-    Your existing implementation likely lives here already.
-    Keep yours.
-    """
-    # --- KEEP YOUR CURRENT IMPLEMENTATION ---
     # Placeholder safe pass-through:
     return True, []
 
 
-# ----------------------------
-# NEW: Citation label validator
-# ----------------------------
+# Citation label validator
 
 _CIT_PAREN_RE = re.compile(r"\(([A-Z0-9_]+)\)")
 _CIT_EVIDENCE_RE = re.compile(r"(?im)\bEVIDENCE\s*:\s*(.+?)\s*$")
@@ -44,7 +31,6 @@ def _split_labels(blob: str) -> list[str]:
         if not s:
             continue
         # allow accidental extra words; keep only label-like tokens
-        # e.g. "PRICE_COMPETITION" ok, "PRICE competition" ignored
         m = re.match(r"^[A-Z0-9_]+$", s)
         if m:
             out.append(s)
@@ -52,12 +38,6 @@ def _split_labels(blob: str) -> list[str]:
 
 
 def extract_citation_labels(text: str) -> Set[str]:
-    """
-    Supports these citation styles in output:
-      - "... (LABEL)"                          -> (LABEL)
-      - "... EVIDENCE: LABEL1, LABEL2"         -> EVIDENCE: ...
-      - "- bullet text ... [LABEL]"            -> [LABEL] (recommended)
-    """
     t = text or ""
     found: Set[str] = set()
 

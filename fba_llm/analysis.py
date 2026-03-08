@@ -77,7 +77,6 @@ def compute_scores(
     sample_confidence_label: str,
     unit_econ: UnitEconomics,
 ) -> Dict[str, int]:
-    # --- Market / competition risk ---
     # price war risk: high spread often means price segmentation/war; label already helps
     pwr = 50.0
     if price_spread_pct is not None:
@@ -152,7 +151,7 @@ def format_structured_analysis(
     scores: Dict[str, int],
     missing: List[str],
 ) -> str:
-    # IMPORTANT: Everything numeric is computed here (not by LLM)
+    # Everything numeric is computed here
     lines = []
     lines.append("STRUCTURED_ANALYSIS (COMPUTED; DO NOT CHANGE):")
     for k in ["OVERALL_VIABILITY_SCORE", "UNIT_ECON_SCORE", "PRICE_WAR_RISK_SCORE", "ENTRY_BARRIER_SCORE", "QUALITY_RISK_SCORE", "OPS_RISK_SCORE"]:

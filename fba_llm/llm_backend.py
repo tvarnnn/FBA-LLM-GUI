@@ -273,7 +273,6 @@ def list_models(provider: str = "groq") -> List[str]:
             "claude-3-5-sonnet-latest",
         ])
 
-        # de-dupe while preserving order
         seen = set()
         deduped = []
         for m in out:

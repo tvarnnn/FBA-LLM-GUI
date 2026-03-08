@@ -40,9 +40,7 @@ def _to_float(x: str) -> Optional[float]:
         return None
 
 
-# -----------------------------
 # Review theme block helpers
-# -----------------------------
 def _looks_valid_theme_block(t: str) -> bool:
     t = (t or "").strip()
     if "TEXT_PRAISE:" not in t or "TEXT_COMPLAINTS:" not in t:
@@ -203,9 +201,7 @@ def extract_text_findings_api(text: str, cfg: ChunkConfig = ChunkConfig()) -> st
     return "TEXT_FINDINGS:\n" + "\n".join([f"- {b}" for b in deduped])
 
 
-# -----------------------------
-# TXT facts block (FIXES RED LINE)
-# -----------------------------
+# TXT facts block
 def build_facts_block(
     file_path: Path,
     *,
@@ -251,9 +247,7 @@ def build_facts_block(
     )
 
 
-# -----------------------------
 # CSV summarization
-# -----------------------------
 def summarize_csv(path: Path, max_rows: int = 2000) -> str:
     with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
         reader = csv.DictReader(f)
@@ -418,9 +412,7 @@ def summarize_csv(path: Path, max_rows: int = 2000) -> str:
     return "\n".join(lines)
 
 
-# -----------------------------
 # Combined facts
-# -----------------------------
 def build_combined_facts_block(
     *,
     metrics_csv: Optional[Path] = None,

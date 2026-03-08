@@ -1,4 +1,3 @@
-# fba_llm/schema.py
 from __future__ import annotations
 
 import re
@@ -39,7 +38,7 @@ def _norm(s: str) -> str:
     return s
 
 
-# Common CSV headers you’ll see from Amazon reports + common tools
+# Common CSV headers you’ll see on Amazon reports + common tools
 CANDIDATES: Dict[str, List[str]] = {
     "asin": ["asin", "asins", "parent_asin", "child_asin", "seller_sku_asin"],
     "title": ["title", "product_title", "product_name", "name"],

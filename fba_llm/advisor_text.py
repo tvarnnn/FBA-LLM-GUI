@@ -17,7 +17,6 @@ ALLOWED_STATES: Set[str] = {
     "INSUFFICIENT_DATA",
 }
 
-# IMPORTANT: this must match the *exact* strings in build_prompt().
 REQUIRED_HEADERS = [
     "DECISION:",
     "RATIONALE (EVIDENCE-BASED):",
@@ -28,7 +27,6 @@ REQUIRED_HEADERS = [
     "NEXT ACTIONS (LOW-COST TESTS FIRST):",
 ]
 
-# This is the whitelist the model is allowed to cite.
 # Anything else = invalid output -> repair loop.
 ALLOWED_CITATION_LABELS: Set[str] = {
     "ASSUMPTIONS",
@@ -143,7 +141,7 @@ def _format_ok(text: str) -> Tuple[bool, str]:
         if h not in t:
             return False, f"Missing header: {h}"
 
-    # Must have at least 1 bullet under each header (quick check)
+    # Must have at least 1 bullet under each header
     for h in REQUIRED_HEADERS:
         # look for header then a bullet after it
         pat = rf"(?ims)^{re.escape(h)}\s*\n-\s+\S+"
@@ -261,7 +259,7 @@ def run_advisor_text_strict(
 
         last = out2
 
-    # Fallback: still valid format + valid labels
+    # fallback: still valid format + valid labels
     return (
         "DECISION:\n"
         "- INSUFFICIENT_DATA\n\n"
